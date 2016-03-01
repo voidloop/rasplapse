@@ -3,7 +3,8 @@
 
 #define TOTAL_FRAMES 5
 
-int glo_total_frames = TOTAL_FRAMES; 
+int glo_frames = TOTAL_FRAMES; 
+int glo_interval = 10; //seconds
 
 //-----------------------------------------------------------------------------
 int main()    
