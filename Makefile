@@ -16,5 +16,14 @@ context.o: context.c
 camera.o: camera.c
 	$(CC) $(CFLAGS) camera.c
 
+event.o: event.c
+	$(CC) $(CFLAGS) event.c
+
+encoder.o: encoder.c
+	$(CC) $(CFLAGS) encoder.c
+
+lcd_drv.o: lcd_drv.c
+	$(CC) $(CFLAGS) lcd_drv.c
+
 clean:
 	rm *.o timelapse
