@@ -15,12 +15,12 @@ void encoder_init()
     gpioSetMode(ENCODER_B, PI_INPUT);
     gpioSetMode(ENC_BUTTON, PI_INPUT);
 
-    /* pull up is needed as encoder common is grounded */
+    // pull up is needed as encoder common is grounded
     gpioSetPullUpDown(ENCODER_A, PI_PUD_UP);
     gpioSetPullUpDown(ENCODER_B, PI_PUD_UP);
     gpioSetPullUpDown(ENC_BUTTON, PI_PUD_UP);
 
-    /* monitor encoder level changes */
+    // monitor encoder level changes 
     gpioSetAlertFunc(ENCODER_A, encoder_pulse);
     gpioSetAlertFunc(ENCODER_B, encoder_pulse);
     gpioSetAlertFunc(ENC_BUTTON, encoder_button);
@@ -53,7 +53,11 @@ void encoder_pulse(int gpio, int level, uint32_t tick)
  
     if (!dir) return;
     
-    wakeup_event_handler(EV_PULSE, dir);
+    struct Event ev;
+    ev.type = EV_PULSE;
+    ev.value = dir;
+
+    generate_event(ev);
 }
 
 
@@ -70,5 +74,8 @@ void encoder_button(int gpio, int level, uint32_t tick)
     // dont process button release
     if (level != 0) return;
 
-    wakeup_event_handler(EV_BUTTON, 0);
+    struct Event ev;
+    ev.type = EV_BUTTON;
+
+    generate_event(ev);
 }

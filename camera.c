@@ -3,26 +3,178 @@
 #include <sys/time.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <string.h>
+#include <gphoto2/gphoto2-camera.h>
 
 #include "camera.h"
 #include "lcd.h"
-#include "event.h"
 
 // timelapse settings 
-extern long glo_frames;
-extern long glo_interval;
-extern long glo_delay;
+extern long glob_frames;
+extern long glob_interval;
+extern long glob_delay;
 
-// control thread execution 
-static volatile int glo_done;
+// gphoto2 context
+static GPContext *main_context;
 
-// gphoto2 context and camera 
-static GPContext *glo_context;
-static Camera *glo_camera;
+// variables to control camera thread 
+static volatile int thread_done = 1;
+static pthread_mutex_t mutex;
+static pthread_cond_t condm; // master
+static pthread_cond_t condw; // worker
 
-// pthread
-static pthread_t glo_thread;
-static pthread_attr_t glo_attr;
+//-----------------------------------------------------------------------------
+// This function looks up a label or key entry of a configuration widget.
+// The functions descend recursively, so you can just specify the last 
+// component.
+//
+static int
+_lookup_widget(CameraWidget*widget, const char *key, CameraWidget **child) 
+{
+	int ret;
+	ret = gp_widget_get_child_by_name (widget, key, child);
+	if (ret < GP_OK)
+		ret = gp_widget_get_child_by_label (widget, key, child);
+	return ret;
+}
+
+//-----------------------------------------------------------------------------
+// Gets a string configuration value.
+// This can be:
+//  - A Text widget
+//  - The current selection of a Radio Button choice
+//  - The current selection of a Menu choice
+//
+// Sample (for Canons eg):
+//   get_config_value_string (camera, "owner", &ownerstr, context);
+//
+static int
+get_config_value_string(Camera *camera, const char *key, char **str, GPContext *context) 
+{
+	CameraWidget		*widget = NULL, *child = NULL;
+	CameraWidgetType	type;
+	int			ret;
+	char			*val;
+
+	ret = gp_camera_get_config (camera, &widget, context);
+	if (ret < GP_OK) {
+		fprintf (stderr, "camera_get_config failed: %d\n", ret);
+		return ret;
+	}
+	ret = _lookup_widget (widget, key, &child);
+	if (ret < GP_OK) {
+		fprintf (stderr, "lookup widget failed: %d\n", ret);
+		goto out;
+	}
+
+	/* This type check is optional, if you know what type the label
+	 * has already. If you are not sure, better check. */
+	ret = gp_widget_get_type (child, &type);
+	if (ret < GP_OK) {
+		fprintf (stderr, "widget get type failed: %d\n", ret);
+		goto out;
+	}
+	switch (type) {
+        case GP_WIDGET_MENU:
+        case GP_WIDGET_RADIO:
+        case GP_WIDGET_TEXT:
+		break;
+	default:
+		fprintf (stderr, "widget has bad type %d\n", type);
+		ret = GP_ERROR_BAD_PARAMETERS;
+		goto out;
+	}
+
+	/* This is the actual query call. Note that we just
+	 * a pointer reference to the string, not a copy... */
+	ret = gp_widget_get_value (child, &val);
+	if (ret < GP_OK) {
+		fprintf (stderr, "could not query widget value: %d\n", ret);
+		goto out;
+	}
+	/* Create a new copy for our caller. */
+	*str = strdup (val);
+out:
+	gp_widget_free (widget);
+	return ret;
+}
+
+//-----------------------------------------------------------------------------
+// Sets a string configuration value.
+// This can set for:
+//  - A Text widget
+//  - The current selection of a Radio Button choice
+//  - The current selection of a Menu choice
+//
+// Sample (for Canons eg):
+//   set_config_value_string (camera, "owner", ownerstr, context);
+//
+static int
+set_config_value_string(Camera *camera, const char *key, const char *val, GPContext *context)
+{
+	CameraWidget		*widget = NULL, *child = NULL;
+	CameraWidgetType	type;
+	int			ret;
+
+	ret = gp_camera_get_config (camera, &widget, context);
+	if (ret < GP_OK) {
+		fprintf (stderr, "camera_get_config failed: %d\n", ret);
+		return ret;
+	}
+	ret = _lookup_widget (widget, key, &child);
+	if (ret < GP_OK) {
+		fprintf (stderr, "lookup widget failed: %d\n", ret);
+		goto out;
+	}
+
+	/* This type check is optional, if you know what type the label
+	 * has already. If you are not sure, better check. */
+	ret = gp_widget_get_type (child, &type);
+	if (ret < GP_OK) {
+		fprintf (stderr, "widget get type failed: %d\n", ret);
+		goto out;
+	}
+	switch (type) {
+        case GP_WIDGET_MENU:
+        case GP_WIDGET_RADIO:
+        case GP_WIDGET_TEXT:
+		/* This is the actual set call. Note that we keep
+		 * ownership of the string and have to free it if necessary.
+		 */
+		ret = gp_widget_set_value (child, val);
+		if (ret < GP_OK) {
+			fprintf (stderr, "could not set widget value: %d\n", ret);
+			goto out;
+		}
+		break;
+        case GP_WIDGET_TOGGLE: {
+		int ival;
+
+		sscanf(val,"%d",&ival);
+		ret = gp_widget_set_value (child, &ival);
+		if (ret < GP_OK) {
+			fprintf (stderr, "could not set widget value: %d\n", ret);
+			goto out;
+		}
+		break;
+	}
+	default:
+		fprintf (stderr, "widget has bad type %d\n", type);
+		ret = GP_ERROR_BAD_PARAMETERS;
+		goto out;
+	}
+
+	/* This stores it on the camera again */
+	ret = gp_camera_set_config (camera, widget, context);
+	if (ret < GP_OK) {
+		fprintf (stderr, "camera_set_config failed: %d\n", ret);
+		return ret;
+	}
+out:
+	gp_widget_free (widget);
+	return ret;
+}
+
 
 //-----------------------------------------------------------------------------
 static void ctx_error_fn(GPContext *context, const char *str, void *data)
@@ -39,120 +191,97 @@ static void ctx_status_fn(GPContext *context, const char *str, void *data)
 }
 
 //-----------------------------------------------------------------------------
-// prepares variables to use gphoto2 and pthread:  
-void gphoto2_pthread_init() 
+void timelapse_init() 
 {
     // gphoto2
-	glo_context = gp_context_new();
-    gp_context_set_error_func (glo_context, ctx_error_fn, NULL);
-    gp_context_set_status_func (glo_context, ctx_status_fn, NULL);
+	main_context = gp_context_new();
+    gp_context_set_error_func(main_context, ctx_error_fn, NULL);
+    gp_context_set_status_func(main_context, ctx_status_fn, NULL);
 
-    // pthread
-    pthread_attr_init(&glo_attr);
-    pthread_attr_setdetachstate(&glo_attr, PTHREAD_CREATE_DETACHED);
+    // initialize mutex and condition variables object
+    pthread_mutex_init(&mutex, NULL);
+    pthread_cond_init(&condw, NULL);
+    pthread_cond_init(&condm, NULL);
 }
 
-//-----------------------------------------------------------------------------
-// releases resources:
-void gphoto2_pthread_destroy() 
-{
-    pthread_attr_destroy(&glo_attr);
-}
 
 //-----------------------------------------------------------------------------
-int camera_init()
+static void *timelapse_loop(void *arg) 
 {
-    gp_camera_new(&glo_camera);
-    printf("Camera init. Takes about 10 seconds.\n");
-
-    int retval = gp_camera_init(glo_camera, glo_context);
-    if (retval != GP_OK) 
-    {
-        printf("ERROR: gp_camera_init() failed, retval=%d\n", retval);
-        return -1;
-    }
-
-    return 0;
-}
-
-//-----------------------------------------------------------------------------
-static void *camera_loop(void *arg) 
-{
+    Camera *camera = (Camera *) arg;
     CameraFilePath path;
-    int retval = 0;
+    int ret, sec;
+
     long nrcaptures = 1;
-    struct timeval nexttime, now;
+    struct timeval next, now;
+    struct timespec ts; 
     static char buf[32]; 
 
-    // waiting 
-    if (glo_delay > 0) 
+    if (glob_delay != 0) 
     {
-        gettimeofday(&nexttime, NULL);
-        now = nexttime; 
-    
-        nexttime.tv_sec += glo_delay;
+        gettimeofday(&next, NULL);
+        now = next;
+        next.tv_sec += glob_delay;
+
+        // lock 'thread_done' 
+        pthread_mutex_lock(&mutex); 
 
         lcd_clear();
-        lcd_puts("Waiting         ");
+        lcd_puts("Waiting");
         lcd_set_cursor(1, 0);
-    
-        while (now.tv_sec < nexttime.tv_sec) 
+       
+        while (!thread_done && now.tv_sec < next.tv_sec) 
         {
-            if (glo_done) goto out; // exit immidiatly
-
-            int seconds = nexttime.tv_sec - now.tv_sec;        
-            int s = seconds % 60; 
-            int m = (seconds / 60) % 60; 
-            int h = seconds / 3600;
-
-            sprintf(buf, "%02d:%02d'%02d''      ", h, m, s);
+            // print remaining time to lcd 
+            sec = next.tv_sec - now.tv_sec;            
+            sprintf(buf, "%02d:%02d'%02d''", sec/3600, (sec/60)%60, sec%60);
             lcd_puts(buf);
 
+            // wait 100 millis
+            ts.tv_sec = now.tv_sec;
+            ts.tv_nsec = (now.tv_usec + 100000) * 1000;
+            pthread_cond_timedwait(&condw, &mutex, &ts);
+
             gettimeofday(&now, NULL);
-
-            usleep(20000);
         }
+
+        // notify master
+        pthread_cond_signal(&condm);
+
+        // unlock 'thread_done'
+        pthread_mutex_unlock(&mutex);
     }
 
+    // lock 'thread_done'
+    pthread_mutex_lock(&mutex);
 
+    // clear lcd and print a title
     lcd_clear();
-    if (glo_frames != 0)
-    {
-        sprintf(buf, "Capturing  %5ld", glo_frames);
-        lcd_puts(buf);
-    }
+    if (glob_frames != 0)
+        sprintf(buf, "Capturing  %5ld", glob_frames);
     else 
-    {
-        lcd_puts("Capturing       ");
-    }
-
+        sprintf(buf, "Capturing");
+    lcd_puts(buf);
     lcd_set_cursor(1, 0); 
     
     // start time 
-    gettimeofday(&nexttime, NULL);
-    now = nexttime; 
+    gettimeofday(&next, NULL);
+    now = next; 
 
-    while ( !glo_done && (glo_frames == 0 || nrcaptures <= glo_frames) ) 
+    while (!thread_done && (glob_frames == 0 || nrcaptures <= glob_frames)) 
     {
-
-        int seconds = nexttime.tv_sec - now.tv_sec;
-        
-        int s = seconds % 60; 
-        int m = (seconds / 60) % 60; 
-        int h = seconds / 3600; 
-   
-        sprintf(buf, "%02d:%02d'%02d'' %5ld", h, m, s, nrcaptures-1);
+        sec = next.tv_sec - now.tv_sec;
+        if (sec < 0) sec = 0; 
+        sprintf(buf, "%02d:%02d'%02d'' %5ld", sec/3600, (sec/60)%60, sec%60, nrcaptures-1);
         lcd_puts(buf);
         
-        gettimeofday(&now, NULL);
-
-        if (now.tv_sec >= nexttime.tv_sec) {
-            nexttime.tv_sec += glo_interval; 
+        if (now.tv_sec >= next.tv_sec) {
+            next.tv_sec += glob_interval; 
 
             printf("Capturing\n");
-            retval = gp_camera_capture(glo_camera, GP_CAPTURE_IMAGE, &path, glo_context);
-            if (retval != GP_OK) {
-                printf("ERROR: gp_camera_capture() failed, retval=%d\n", retval);
+            ret = gp_camera_capture(camera, GP_CAPTURE_IMAGE, &path, main_context);
+            if (ret != GP_OK) {
+                printf("gp_camera_capture() failed: %d\n", ret);
                 break;
             }
         
@@ -160,44 +289,106 @@ static void *camera_loop(void *arg)
             nrcaptures++;
         }
 
-        usleep(10000); 
+        // wait 100 millis
+        ts.tv_sec = now.tv_sec;
+        ts.tv_nsec = (now.tv_usec + 100000) * 1000;
+        pthread_cond_timedwait(&condw, &mutex, &ts);
+        gettimeofday(&now, NULL);
     }
 
-out: 
+    gp_camera_exit(camera, main_context);
 
-    change_state(S_MENU);
-    gp_camera_exit(glo_camera, glo_context);
-    pthread_exit(NULL);
+    thread_done = 1;
+
+    // notify master
+    pthread_cond_signal(&condm);
+
+    // unlock 'thread_done'
+    pthread_mutex_unlock(&mutex);
+
+    //pthread_exit(NULL);
+    return NULL;
+}
+
+
+//-----------------------------------------------------------------------------
+int timelapse_start()
+{        
+    Camera *camera;
+    pthread_t thread;
+    pthread_attr_t attr;
+    int ret;   
+
+    printf("Camera init. Takes about 10 seconds.\n");
+    gp_camera_new(&camera); 
+
+    ret = gp_camera_init(camera, main_context);
+    if (ret < GP_OK) 
+    {
+        fprintf(stderr, "gp_camera_init() failed: %d\n", ret);
+        return -1;
+    }
+
+    char target[] = "Memory card";
+    ret = set_config_value_string(camera, "capturetarget", target, main_context);
+    if (ret < GP_OK)
+    {
+        fprintf(stderr, "gp_camera_init() failed: %d\n", ret);
+        return -1;
+    }
+
+    // start a new thread to capture images
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    
+    thread_done = 0;
+    pthread_create(&thread, &attr, timelapse_loop, (void *) camera);
+    pthread_attr_destroy(&attr);
+
+    return 0;
+}
+
+
+//-----------------------------------------------------------------------------
+void timelapse_stop() 
+{
+    // lock 'thread_done'
+    pthread_mutex_lock(&mutex);
+
+    // if there is a worker then stop it
+    if (thread_done==0) 
+    {        
+        thread_done = 1;
+        pthread_cond_signal(&condw);
+
+        // wait worker signal
+        pthread_cond_wait(&condm, &mutex);
+    }
+
+    // unlock 'thread_done'
+    pthread_mutex_unlock(&mutex);
 }
 
 //-----------------------------------------------------------------------------
-void camera_start_capture() 
+void timelapse_destroy( void )
 {
-    glo_done = 0; 
-    pthread_create(&glo_thread, &glo_attr, camera_loop, NULL);
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&condw);
+    pthread_cond_destroy(&condm);
 }
-
-//-----------------------------------------------------------------------------
-void camera_stop_capture() 
-{
-    glo_done = 1;
-}
-
-
-
 
 //-----------------------------------------------------------------------------
 /*static int wait_for_event(long waittime) 
-{
+{&mutex
 	CameraEventType	evtype;
 	CameraFilePath	*path;
-    int retval = 0;
+    int ret = 0;
     void *data = NULL; 
 
 	evtype = GP_EVENT_UNKNOWN;
-	retval = gp_camera_wait_for_event(glo_camera, waittime, &evtype, &data, glo_context);
-	if (retval != GP_OK) {
-		return retval;
+	ret = gp_camera_wait_for_event(glob_camera, waittime, &evtype, &data, main_context);
+	if (ret != GP_OK) {
+		return ret;
     }
 
 	path = data;

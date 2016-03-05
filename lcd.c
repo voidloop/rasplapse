@@ -1,4 +1,10 @@
 #include <pigpio.h>
+#include <pthread.h>
+#include <sys/time.h>
+#include <stdio.h>
+#include <errno.h>
+ 
+
 #include "lcd.h"
 
 #define	LCD_RS 25
@@ -8,10 +14,119 @@
 #define	LCD_D6 27
 #define	LCD_D7 17
 
-static uint8_t glo_pos;
+#define LCD_BL 12 
 
-//-----------------------------------------------------------------------------
-static void lcd_write_byte(const uint8_t b)
+static uint8_t curr_position;
+
+static volatile int thread_done = 1;
+static pthread_mutex_t mutex; 
+static pthread_cond_t condm; // master
+static pthread_cond_t condw; // worker
+
+// --------------------------------------------------------
+// thread routine for fade out effect
+//
+static void * fadeout_loop( void *arg ) 
+{
+    const int wait_seconds = 60; 
+    int pwm = 255;
+    struct timespec ts;
+    struct timeval now;
+
+    // lock mutex
+    pthread_mutex_lock(&mutex);
+
+    // set gpio pwm to 100%
+    gpioPWM(LCD_BL, pwm);        
+
+    // convert 'now' in timespec and add 'wait_seconds'
+    gettimeofday(&now, NULL);
+    ts.tv_sec = now.tv_sec + wait_seconds; 
+    ts.tv_nsec = now.tv_usec * 1000;
+
+    // wait 'wait_seconds' or master signal
+    pthread_cond_timedwait(&condw, &mutex, &ts);
+
+    while (!thread_done && pwm > 0) 
+    {   
+        gettimeofday(&now, NULL);
+        
+        // convert timeval to timespec
+        ts.tv_sec = now.tv_sec;
+        ts.tv_nsec = (now.tv_usec + 10000) * 1000;
+
+        // set gpio pwm
+        gpioPWM(LCD_BL, --pwm);        
+
+        // wait for 10 millis or master signal
+        pthread_cond_timedwait(&condw, &mutex, &ts);
+    }
+    
+    thread_done = 1;    
+
+    // notify master thread that my work is finished
+    pthread_cond_signal(&condm);
+    
+    // unlock mutex
+    pthread_mutex_unlock(&mutex);
+
+    return NULL;
+}
+
+
+// --------------------------------------------------------
+// starts fade out thread 
+//
+static void fadeout_start( void ) 
+{
+    pthread_t thread;
+    pthread_attr_t attr;
+
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    thread_done = 0;
+    pthread_create(&thread, &attr, fadeout_loop, NULL); 
+    pthread_attr_destroy(&attr);
+}
+
+// --------------------------------------------------------
+// stops fade out thread
+//
+static void fadeout_stop( void ) 
+{
+    // lock mutex
+    pthread_mutex_lock(&mutex);
+
+    // if already exists a worker then stop it
+    if (thread_done==0) 
+    {
+        // stop it 
+        thread_done = 1;
+        pthread_cond_signal(&condw);
+
+        // wait its signal
+        pthread_cond_wait(&condm, &mutex);
+    }
+
+    // unlock mutex 
+    pthread_mutex_unlock(&mutex);
+}
+
+
+// --------------------------------------------------------
+// restarts fade out thread
+//
+void lcd_fadeout( void ) 
+{
+    fadeout_stop();
+    fadeout_start(); 
+}
+
+// ---------------------------------------------------------
+// writes a byte to lcd data bus
+//
+static void lcd_write_byte( const uint8_t b )
 {
     int rs = gpioRead(LCD_RS);
     
@@ -40,11 +155,13 @@ static void lcd_write_byte(const uint8_t b)
     (rs == 1) ? gpioDelay(200) : gpioDelay(5500); 
 }
 
-//-----------------------------------------------------------------------------
-int lcd_putc(const char c)
+// ---------------------------------------------------------
+// prints a character to the lcd screen
+//
+int lcd_putc( const char c )
 {
     // remember last position command
-    lcd_write_byte(glo_pos);
+    lcd_write_byte(curr_position);
 
 	gpioWrite(LCD_RS, 1);
 	lcd_write_byte(c);
@@ -52,9 +169,10 @@ int lcd_putc(const char c)
     return (int)c;
 }
 
-//-----------------------------------------------------------------------------
-void lcd_set_cursor(const uint8_t row, 
-                    const uint8_t column)
+// --------------------------------------------------------
+// positions the lcd cursor 
+//
+void lcd_set_cursor( const int row, const int column )
 {
     uint8_t command = 0x80;
 	gpioWrite(LCD_RS, 0);
@@ -67,16 +185,18 @@ void lcd_set_cursor(const uint8_t row,
 			break;
 	}
 
-    glo_pos = command;
+    curr_position = command;
 	lcd_write_byte(command);
 }
 
-//-----------------------------------------------------------------------------
-int lcd_puts(const char *s)
+// --------------------------------------------------------
+// prints text to the lcd screen
+//
+int lcd_puts( const char *s )
 {
     // remember last position command
     gpioWrite(LCD_RS, 0);
-    lcd_write_byte(glo_pos);
+    lcd_write_byte(curr_position);
 
     if(s != NULL) {
 		gpioWrite(LCD_RS, 1);
@@ -91,19 +211,24 @@ int lcd_puts(const char *s)
 	}
 }
 
-//-----------------------------------------------------------------------------
-void lcd_clear() 
+// --------------------------------------------------------
+// clears lcd screen and positions the cursor
+// in the upper-left corner
+//
+void lcd_clear( void ) 
 {
     gpioWrite(LCD_RS, 0);
 	lcd_write_byte(0x01);
     
     // first row and first column
-    glo_pos = 0x80;
+    curr_position = 0x80;
 }
 
 
-//-----------------------------------------------------------------------------
-void lcd_init()
+//---------------------------------------------------------
+// initilizes lcd screen and pthread objects
+//
+void lcd_init( void )
 {
     // set pin mode
     gpioSetMode(LCD_RS, PI_OUTPUT);
@@ -195,10 +320,24 @@ void lcd_init()
     lcd_write_byte(0x0C);
 
     // first row and first column
-    glo_pos = 0x80;
+    curr_position = 0x80;
+
+    // initialize mutex and condition variables object
+    pthread_mutex_init(&mutex, NULL);
+    pthread_cond_init(&condw, NULL);
+    pthread_cond_init(&condm, NULL);
+
+    lcd_fadeout();
 }
 
-
-
-
+// --------------------------------------------------------
+// cleans up pthread objects
+//
+void lcd_destroy( void )
+{
+    fadeout_stop();
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&condw);
+    pthread_cond_destroy(&condm);
+}
 

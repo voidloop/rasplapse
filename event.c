@@ -9,26 +9,25 @@
 #include "camera.h"
 
 // program state
-static int glo_progstate = S_MENU;
+static int prog_state = S_MENU;
 
 // timelapse settings
-long glo_interval = 0;
-long glo_delay = 0;
-long glo_frames = 0;
+long glob_interval = 0;
+long glob_delay = 0;
+long glob_frames = 0;
 
-// event variables
-static int glo_evtype = EV_NONE; 
-static int glo_evvalue = 0;
-static pthread_mutex_t glo_evmutex; 
-static pthread_cond_t  glo_evcond;
+static struct Event    event;
+static pthread_mutex_t mutex; 
+static pthread_cond_t  cond;
 
 //-----------------------------------------------------------------------------
-struct MenuEntry {
-    char text[17];   /* menu entry text */   
-    int nextstate; /* next state */
+struct MenuEntry 
+{
+    char text[17]; // entry text
+    int  next;     // next state 
 };
 
-const static struct MenuEntry glo_mainmenu[] = {
+const static struct MenuEntry main_menu[] = {
     { "1. Interval     ", S_INTERVAL },
     { "2. Delay        ", S_DELAY },
     { "3. Frames       ", S_FRAMES },
@@ -39,40 +38,39 @@ const static struct MenuEntry glo_mainmenu[] = {
 void menu_init() 
 {
     lcd_puts("Timelapse!      ");
-
     lcd_set_cursor(1, 0);
-    lcd_puts(glo_mainmenu[0].text);       
+    lcd_puts(main_menu[0].text);       
 }
 
 //-----------------------------------------------------------------------------
 // deals menu events: 
-void menu_update(int evtype, int dir)
+void menu_update(struct Event ev)
 {
-    const int len = sizeof(glo_mainmenu)/sizeof(struct MenuEntry);
+    const int len = sizeof(main_menu)/sizeof(struct MenuEntry);
     static int index = 0;
 
-    switch (evtype) 
+    switch (ev.type) 
     {
     case EV_PULSE:
-        index += dir;
+        index += ev.value;
         if (index < 0) index = 0;
         else if (index >= len) index = len - 1;           
         break; 
 
     case EV_BUTTON:
-        change_state(glo_mainmenu[index].nextstate);
+        change_state(main_menu[index].next);
         return;
     }
 
 
     lcd_set_cursor(1, 0);
-    lcd_puts(glo_mainmenu[index].text);
+    lcd_puts(main_menu[index].text);
 }
 
 
 //-----------------------------------------------------------------------------
 // an user interface to change target value:
-void menu_number(long *target, int evtype, int dir)
+void menu_number(long *target, struct Event ev)
 {
     // two items: num(0), ok(1) 
     const int items = 2;
@@ -85,8 +83,9 @@ void menu_number(long *target, int evtype, int dir)
 
     const int maxval = 99999;
     long nextval;   
+    int dir = ev.value;
 
-    switch (evtype) 
+    switch (ev.type) 
     {
     case EV_PULSE:
         if (edit) 
@@ -131,7 +130,7 @@ void menu_number(long *target, int evtype, int dir)
 
 //-----------------------------------------------------------------------------
 // an user interface to change target value with a timer HH:MM'SS'':
-void menu_timer(long *target, int evtype, int dir)
+void menu_timer(long *target, struct Event ev)
 {
     static char buf[64];
     
@@ -143,8 +142,10 @@ void menu_timer(long *target, int evtype, int dir)
 
     const int maxval = 359999; // 99*3600 + 59*60 + 59
     long nextval;   
+    int dir = ev.value;
+    
 
-    switch (evtype) 
+    switch (ev.type) 
     {
     case EV_PULSE:
         if (edit) 
@@ -208,159 +209,147 @@ void menu_timer(long *target, int evtype, int dir)
 void change_state(int state) 
 {
     lcd_clear();
+    prog_state = state;
 
-    glo_progstate = state;
-    printf("state=%d\n", state);
+    struct Event ev;
+    ev.type = EV_NONE;
 
     switch (state) 
     {
     case S_MENU: 
         lcd_puts("Timelapse!      ");
-        menu_update(EV_NONE, 0);
+        menu_update(ev);
         break;
 
     case S_INTERVAL:
         lcd_puts("Interval        ");    
-        menu_timer(&glo_interval, EV_NONE, 0);
+        menu_timer(&glob_interval, ev);
         break;    
 
     case S_DELAY: 
         lcd_puts("Delay           ");    
-        menu_timer(&glo_delay, EV_NONE, 0);
+        menu_timer(&glob_delay, ev);
         break;
 
     case S_FRAMES: 
         lcd_puts("Frames          ");    
-        menu_number(&glo_frames, EV_NONE, 0);
+        menu_number(&glob_frames, ev);
         break;
 
     case S_RUNNING: 
-        if (glo_interval == 0)
+
+        if (glob_interval == 0)
         {
             change_state(S_INTERVAL);
             break;
         }
-        
-        lcd_clear();
 
-        if (camera_init() != 0) 
+        if (timelapse_start() < 0) 
         {
-            lcd_puts("NO CAMERA!"); 
-            glo_progstate = S_MENU;
-            menu_update(EV_NONE, 0);     
-            break;
-        }
-        else 
-        {
-            camera_start_capture();
+            lcd_clear();           
+            lcd_puts("CAMERA ERROR!"); 
+            prog_state = S_MENU;
+            menu_update(ev);     
         }
 
+        break;
     } 
 }
 
 
 //-----------------------------------------------------------------------------
 // centralized event handler:
-void *event_handler(void *arg)
+void process_events()
 {
     while (1)
     {
-        // protect glo_encoder_event
-        pthread_mutex_lock(&glo_evmutex);
+        // protect glob_encoder_event
+        pthread_mutex_lock(&mutex);
 
         // if there isn't event to process then wait
-        while (glo_evtype == EV_NONE)
-            pthread_cond_wait(&glo_evcond, &glo_evmutex);
+        while (event.type == EV_NONE)
+            pthread_cond_wait(&cond, &mutex);
 
-        switch (glo_progstate) 
+        lcd_fadeout();
+
+        switch (prog_state) 
         {
         case S_MENU:
-            menu_update(glo_evtype, glo_evvalue);
+            menu_update(event);
             break; 
 
         case S_INTERVAL:
-            menu_timer(&glo_interval, glo_evtype, glo_evvalue);
+            menu_timer(&glob_interval, event);
             break;
 
         case S_DELAY:
-            menu_timer(&glo_delay, glo_evtype, glo_evvalue);
+            menu_timer(&glob_delay, event);
             break;
         
         case S_FRAMES:
-            menu_number(&glo_frames, glo_evtype, glo_evvalue);
+            menu_number(&glob_frames, event);
             break;
         
         case S_RUNNING:
-            if (glo_evtype == EV_BUTTON)
-                camera_stop_capture();
+            if (event.type == EV_BUTTON) 
+            {   
+                lcd_clear();
+                lcd_puts("Stopping");
+                timelapse_stop();
+                change_state(S_MENU);
+            }
+
             break;
         }
 
-        glo_evtype = EV_NONE;
+        event.type = EV_NONE;
 
         // release event flag
-        pthread_mutex_unlock(&glo_evmutex); 
-    }
-
-    // exit
-    pthread_exit(NULL);
-}
-
-//-----------------------------------------------------------------------------
-void wakeup_event_handler(int evtype, int evvalue) 
-{
-    // protect glo_evtype, if event handler is processing then return
-    int retval = pthread_mutex_trylock(&glo_evmutex);
-
-    if (retval == 0)
-    {
-        glo_evtype = evtype;
-        glo_evvalue = evvalue;
-        pthread_cond_signal(&glo_evcond);   // wake up event handler
-        pthread_mutex_unlock(&glo_evmutex); // release glo_evtype
-    }
-    else if (retval != EBUSY) 
-    {
-        printf("pthread_mutex_trylock() failed, retval=%d\n", retval); 
+        pthread_mutex_unlock(&mutex); 
     }
 }
 
 //-----------------------------------------------------------------------------
-int main(int argc, char * argv[])
+void generate_event(struct Event ev) 
 {
-    // event thread 
-    pthread_t thread;
-    pthread_attr_t attr;
+    // if event handler is processing then return
+    int ret;
+    
+    ret = pthread_mutex_trylock(&mutex);
+    if (ret == 0)
+    {
+        event = ev;
+        pthread_cond_signal(&cond);   // wake up event handler
+        pthread_mutex_unlock(&mutex); // release ev_type
+    }
+    else if (ret != EBUSY) 
+    {
+        printf("pthread_mutex_trylock() failed, retval=%d\n", ret); 
+    }
+}
 
+//-----------------------------------------------------------------------------
+int main(int argc, char *argv[])
+{
     if (gpioInitialise()<0) return 1;
 
     // initialize mutex and condition variable object
-    pthread_mutex_init(&glo_evmutex, NULL);
-    pthread_cond_init(&glo_evcond, NULL);
-
-    // create threads and join
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
-    pthread_create(&thread, &attr, event_handler, NULL);
+    pthread_mutex_init(&mutex, NULL);
+    pthread_cond_init(&cond, NULL);
 
     encoder_init();
     lcd_init();
     menu_init();    
-    gphoto2_pthread_init();
+    timelapse_init();
 
-    // wait all thread to complete
-    pthread_join(thread, NULL);
-
-    
+    process_events();
+     
     // clean up and exit
     gpioTerminate();
+    pthread_mutex_destroy(&mutex);
+    pthread_cond_destroy(&cond);
 
-    pthread_attr_destroy(&attr);
-    pthread_mutex_destroy(&glo_evmutex);
-    pthread_cond_destroy(&glo_evcond);
-    gphoto2_pthread_destroy();
-
-    pthread_exit(NULL);
+    return 0; 
 }
 
 
