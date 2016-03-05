@@ -8,8 +8,10 @@
 #define	LCD_D6 27
 #define	LCD_D7 17
 
+static uint8_t glo_pos;
+
 //-----------------------------------------------------------------------------
-static void lcd_write_byte(const unsigned char b)
+static void lcd_write_byte(const uint8_t b)
 {
     int rs = gpioRead(LCD_RS);
     
@@ -41,6 +43,9 @@ static void lcd_write_byte(const unsigned char b)
 //-----------------------------------------------------------------------------
 int lcd_putc(const char c)
 {
+    // remember last position command
+    lcd_write_byte(glo_pos);
+
 	gpioWrite(LCD_RS, 1);
 	lcd_write_byte(c);
 	gpioWrite(LCD_RS, 0);
@@ -48,8 +53,8 @@ int lcd_putc(const char c)
 }
 
 //-----------------------------------------------------------------------------
-void lcd_set_cursor(const unsigned char row, 
-                    const unsigned char column)
+void lcd_set_cursor(const uint8_t row, 
+                    const uint8_t column)
 {
     uint8_t command = 0x80;
 	gpioWrite(LCD_RS, 0);
@@ -62,12 +67,17 @@ void lcd_set_cursor(const unsigned char row,
 			break;
 	}
 
+    glo_pos = command;
 	lcd_write_byte(command);
 }
 
 //-----------------------------------------------------------------------------
 int lcd_puts(const char *s)
 {
+    // remember last position command
+    gpioWrite(LCD_RS, 0);
+    lcd_write_byte(glo_pos);
+
     if(s != NULL) {
 		gpioWrite(LCD_RS, 1);
 		while(*s != '\0') {
@@ -86,6 +96,9 @@ void lcd_clear()
 {
     gpioWrite(LCD_RS, 0);
 	lcd_write_byte(0x01);
+    
+    // first row and first column
+    glo_pos = 0x80;
 }
 
 
@@ -180,6 +193,9 @@ void lcd_init()
     // 0  0  0  0  0  0
     // 0  0  1  D  C  B
     lcd_write_byte(0x0C);
+
+    // first row and first column
+    glo_pos = 0x80;
 }
 
 

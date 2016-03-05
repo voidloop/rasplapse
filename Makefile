@@ -1,14 +1,11 @@
 CC=gcc
-CFLAGS=-c -Wall
-LIBS=-lgphoto2
+CFLAGS=-c -Wall 
+LIBS=-lgphoto2 -lpthread -lrt -lpigpio
 
 all: timelapse
 
-timelapse: event.o lcd.c context.o camera.o
-	$(CC) $(LIBS) main.o context.o camera.o -o timelapse
-
-context.o: context.c
-	$(CC) $(CFLAGS) context.c
+timelapse: event.o lcd.o camera.o encoder.o
+	$(CC) $(LIBS) event.o camera.o encoder.o lcd.o -o timelapse 
 
 camera.o: camera.c
 	$(CC) $(CFLAGS) camera.c
@@ -23,4 +20,4 @@ lcd.o: lcd.c
 	$(CC) $(CFLAGS) lcd.c
 
 clean:
-	rm *.o timelapse
+	rm -f *.o timelapse
