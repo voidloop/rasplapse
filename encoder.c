@@ -2,32 +2,17 @@
 #include <pigpio.h>
 
 #include "event.h"
-#include "encoder.h"
 
-#define ENCODER_A    5
-#define ENCODER_B    6
-#define ENC_BUTTON  13
+#define ENC_A    5
+#define ENC_B    6
+#define ENC_BTN 13
 
-//-----------------------------------------------------------------------------
-void encoder_init() 
-{
-    gpioSetMode(ENCODER_A, PI_INPUT);
-    gpioSetMode(ENCODER_B, PI_INPUT);
-    gpioSetMode(ENC_BUTTON, PI_INPUT);
-
-    // pull up is needed as encoder common is grounded
-    gpioSetPullUpDown(ENCODER_A, PI_PUD_UP);
-    gpioSetPullUpDown(ENCODER_B, PI_PUD_UP);
-    gpioSetPullUpDown(ENC_BUTTON, PI_PUD_UP);
-
-    // monitor encoder level changes 
-    gpioSetAlertFunc(ENCODER_A, encoder_pulse);
-    gpioSetAlertFunc(ENCODER_B, encoder_pulse);
-    gpioSetAlertFunc(ENC_BUTTON, encoder_button);
-}
+static void pulse(int gpio, int level, uint32_t tick);
+static void button(int gpio, int level, uint32_t tick); 
 
 //-----------------------------------------------------------------------------
-void encoder_pulse(int gpio, int level, uint32_t tick)
+
+static void pulse(int gpio, int level, uint32_t tick)
 {
     const int8_t directions[] = { 
         0,  1, -1,  0,
@@ -40,9 +25,9 @@ void encoder_pulse(int gpio, int level, uint32_t tick)
     static int8_t dir = 0;
     static uint8_t curr_state=0, prev_state=0;     
 
-    if (gpio == ENCODER_A) lev_a = level; else lev_b = level;
+    if (gpio == ENC_A) lev_a = level; else lev_b = level;
 
-    if (gpio == last_gpio) /* debounce */
+    if (gpio == last_gpio) // debounce
         return;
     
     last_gpio = gpio;
@@ -60,22 +45,41 @@ void encoder_pulse(int gpio, int level, uint32_t tick)
     generate_event(ev);
 }
 
-
 //-----------------------------------------------------------------------------
-void encoder_button(int gpio, int level, uint32_t tick) 
+
+static void button(int gpio, int level, uint32_t tick) 
 {
     static uint32_t last_tick = 0;
     
-    if ((tick - last_tick) < 200000) /* debounce (200 ms) */
+    if ((tick - last_tick) < 200000) // debounce (200 ms) 
         return;
 
     last_tick = tick;
 
-    // dont process button release
+    // skip button release
     if (level != 0) return;
 
     struct Event ev;
     ev.type = EV_BUTTON;
 
     generate_event(ev);
+}
+
+//-----------------------------------------------------------------------------
+
+void encoder_init() 
+{
+    gpioSetMode(ENC_A, PI_INPUT);
+    gpioSetMode(ENC_B, PI_INPUT);
+    gpioSetMode(ENC_BTN, PI_INPUT);
+
+    // pull up is needed as encoder common is grounded
+    gpioSetPullUpDown(ENC_A, PI_PUD_UP);
+    gpioSetPullUpDown(ENC_B, PI_PUD_UP);
+    gpioSetPullUpDown(ENC_BTN, PI_PUD_UP);
+
+    // monitor encoder level changes 
+    gpioSetAlertFunc(ENC_A, pulse);
+    gpioSetAlertFunc(ENC_B, pulse);
+    gpioSetAlertFunc(ENC_BTN, button);
 }

@@ -1,6 +1,9 @@
 #ifndef __LCD_H__
 #define __LCD_H__
 
+#define LCD_COLS 16
+#define LCD_ROWS  2
+
 void lcd_init(void);
 void lcd_destroy(void);
 

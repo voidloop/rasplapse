@@ -24,10 +24,7 @@ static pthread_cond_t condm; // master
 static pthread_cond_t condw; // worker
 
 //-----------------------------------------------------------------------------
-// This function looks up a label or key entry of a configuration widget.
-// The functions descend recursively, so you can just specify the last 
-// component.
-//
+
 static int
 _lookup_widget(CameraWidget*widget, const char *key, CameraWidget **child) 
 {
@@ -39,15 +36,7 @@ _lookup_widget(CameraWidget*widget, const char *key, CameraWidget **child)
 }
 
 //-----------------------------------------------------------------------------
-// Gets a string configuration value.
-// This can be:
-//  - A Text widget
-//  - The current selection of a Radio Button choice
-//  - The current selection of a Menu choice
-//
-// Sample (for Canons eg):
-//   get_config_value_string (camera, "owner", &ownerstr, context);
-//
+
 static int
 get_config_value_string(Camera *camera, const char *key, char **str, GPContext *context) 
 {
@@ -100,15 +89,7 @@ out:
 }
 
 //-----------------------------------------------------------------------------
-// Sets a string configuration value.
-// This can set for:
-//  - A Text widget
-//  - The current selection of a Radio Button choice
-//  - The current selection of a Menu choice
-//
-// Sample (for Canons eg):
-//   set_config_value_string (camera, "owner", ownerstr, context);
-//
+
 static int
 set_config_value_string(Camera *camera, const char *key, const char *val, GPContext *context)
 {
@@ -177,6 +158,7 @@ out:
 
 
 //-----------------------------------------------------------------------------
+
 static void ctx_error_fn(GPContext *context, const char *str, void *data)
 {
     fprintf(stderr, "\n*** Context error ***\n%s\n",str);
@@ -184,6 +166,7 @@ static void ctx_error_fn(GPContext *context, const char *str, void *data)
 }
 
 //-----------------------------------------------------------------------------
+
 static void ctx_status_fn(GPContext *context, const char *str, void *data)
 {
     fprintf(stderr, "%s\n", str);
@@ -191,6 +174,7 @@ static void ctx_status_fn(GPContext *context, const char *str, void *data)
 }
 
 //-----------------------------------------------------------------------------
+
 void timelapse_init() 
 {
     // gphoto2
@@ -206,7 +190,8 @@ void timelapse_init()
 
 
 //-----------------------------------------------------------------------------
-static void *timelapse_loop(void *arg) 
+
+static void *timelapse_thread(void *arg) 
 {
     Camera *camera = (Camera *) arg;
     CameraFilePath path;
@@ -312,6 +297,7 @@ static void *timelapse_loop(void *arg)
 
 
 //-----------------------------------------------------------------------------
+
 int timelapse_start()
 {        
     Camera *camera;
@@ -342,7 +328,7 @@ int timelapse_start()
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
     
     thread_done = 0;
-    pthread_create(&thread, &attr, timelapse_loop, (void *) camera);
+    pthread_create(&thread, &attr, timelapse_thread, (void *) camera);
     pthread_attr_destroy(&attr);
 
     return 0;
@@ -350,6 +336,7 @@ int timelapse_start()
 
 
 //-----------------------------------------------------------------------------
+
 void timelapse_stop() 
 {
     // lock 'thread_done'
@@ -370,6 +357,7 @@ void timelapse_stop()
 }
 
 //-----------------------------------------------------------------------------
+
 void timelapse_destroy( void )
 {
     pthread_mutex_destroy(&mutex);

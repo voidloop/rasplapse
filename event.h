@@ -11,6 +11,15 @@
 #define S_DELAY    3  // set up delay before capturing state
 #define S_FRAMES   4  // set up frames value
 
+enum progstate
+{
+    MENU, 
+    INTERVAL,
+    RUNNING,
+    DELAY,
+    FRAMES
+};
+
 struct Event 
 {
     int type;
